@@ -1,0 +1,37 @@
+<ScrollView
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="50dp" />
+        <Space
+            android:layout_width="match_parent"
+            android:layout_height="100dp" />
+        <EditText
+            android:id="@+id/sendEditText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Enter message to send" />
+
+        <Button
+            android:id="@+id/sendButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Send" />
+
+        <EditText
+            android:id="@+id/receiveEditText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Received message"
+            android:focusable="false" />
+    </LinearLayout>
+</ScrollView>
