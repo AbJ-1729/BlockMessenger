@@ -8,13 +8,15 @@
         android:layout_height="wrap_content"
         android:orientation="vertical"
         android:padding="16dp">
-
-        <View
-            android:layout_width="match_parent"
-            android:layout_height="50dp" />
         <Space
             android:layout_width="match_parent"
             android:layout_height="100dp" />
+        <EditText
+            android:id="@+id/usernameEditText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Enter your username" />
+
         <EditText
             android:id="@+id/sendEditText"
             android:layout_width="match_parent"
@@ -31,7 +33,7 @@
             android:id="@+id/receiveEditText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="Received message"
+            android:hint="Received messages"
             android:focusable="false" />
     </LinearLayout>
 </ScrollView>

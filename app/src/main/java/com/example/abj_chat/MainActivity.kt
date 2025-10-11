@@ -20,11 +20,10 @@ import kotlin.collections.HashSet
 
 class MainActivity : AppCompatActivity() {
 
-    // BLE and permissions
     private lateinit var bluetoothAdapter: BluetoothAdapter
     private lateinit var bluetoothLeAdvertiser: BluetoothLeAdvertiser
     private lateinit var bluetoothLeScanner: BluetoothLeScanner
-    private val serviceUuid = UUID.fromString("0000ab11-0000-1000-8000-00805f9b34fb") // Custom UUID for identification
+    private val serviceUuid = UUID.fromString("0000ab11-0000-1000-8000-00805f9b34fb")
     private val permissions = arrayOf(
         Manifest.permission.BLUETOOTH_ADVERTISE,
         Manifest.permission.BLUETOOTH_SCAN,
@@ -33,19 +32,16 @@ class MainActivity : AppCompatActivity() {
     )
     private val requestCodePermissions = 1
 
-    // App logic
-    private val maxChunkSize = 20 // BLE manufacturer data limit
+    private val maxChunkSize = 20
     private val localMessages = mutableListOf<Message>()
     private val messageSet = HashSet<String>()
     private val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
     private var currentBroadcastMessage: String? = null
+    private val deviceNamePrefix = "ab"
 
-    // For chunk reassembly
-    private val receivedChunks = mutableMapOf<String, SortedMap<Int, String>>() // msgId -> (chunkIdx -> data)
-    private val receivedChunkCounts = mutableMapOf<String, Int>() // msgId -> totalChunks
-
-    // Identification
-    private val ADVERTISE_IDENTIFIER = "ABJCHAT" // 7 bytes, unique for this app
+    private lateinit var usernameEditText: EditText
+    private lateinit var sendEditText: EditText
+    private lateinit var receiveEditText: EditText
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -60,27 +56,40 @@ class MainActivity : AppCompatActivity() {
         bluetoothLeAdvertiser = bluetoothAdapter.bluetoothLeAdvertiser
         bluetoothLeScanner = bluetoothAdapter.bluetoothLeScanner
 
-        // Set device name for user-friendliness (not for filtering)
-        bluetoothAdapter.name = "ABJ_Chat"
-
-        val sendEditText = findViewById<EditText>(R.id.sendEditText)
+        usernameEditText = findViewById(R.id.usernameEditText)
+        sendEditText = findViewById(R.id.sendEditText)
+        receiveEditText = findViewById(R.id.receiveEditText)
         val sendButton = findViewById<Button>(R.id.sendButton)
-        val receiveEditText = findViewById<EditText>(R.id.receiveEditText)
+
+        usernameEditText.setOnFocusChangeListener { _, hasFocus ->
+            if (!hasFocus) updateDeviceName()
+        }
+        usernameEditText.setOnEditorActionListener { _, _, _ ->
+            updateDeviceName()
+            false
+        }
 
         sendButton.setOnClickListener {
-            val message = sendEditText.text.toString()
+            val username = usernameEditText.text.toString().trim()
+            if (username.isBlank()) {
+                Toast.makeText(this, "Please enter a username", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            updateDeviceName()
+            val message = sendEditText.text.toString().trim()
             if (message.isNotBlank()) {
-                val timestamp = System.currentTimeMillis()
-                val newMessage = Message(message, timestamp)
+                val timestamp = System.currentTimeMillis() // Always use current device time
+                val newMessage = Message(username, message, timestamp)
                 addMessage(newMessage)
                 updateBroadcastMessage()
                 Toast.makeText(this, "Broadcasting updated messages", Toast.LENGTH_SHORT).show()
+                sendEditText.setText("")
             } else {
                 Toast.makeText(this, "Enter a message to send", Toast.LENGTH_SHORT).show()
             }
         }
 
-        startScanning(receiveEditText)
+        startScanning()
         updateBroadcastMessage()
     }
 
@@ -89,8 +98,6 @@ class MainActivity : AppCompatActivity() {
             ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
         }
     }
-
-    // --- BLE Advertising ---
 
     private fun updateBroadcastMessage() {
         val broadcastMessage = buildBroadcastMessage()
@@ -101,9 +108,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun buildBroadcastMessage(): String {
-        // Format: ABJCHAT|msg1_ts1,msg2_ts2,...
-        val joined = localMessages.joinToString(",") { "${it.message}_${it.timestamp}" }
-        return "$ADVERTISE_IDENTIFIER|$joined"
+        return localMessages.joinToString(",") { "${it.username}:${it.message}_${it.timestamp}" }
     }
 
     private fun startAdvertising(broadcastMessage: String) {
@@ -122,30 +127,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun splitMessageIntoChunks(message: String): List<ByteArray> {
-        // Each chunk: [IDENTIFIER][MSGID][IDX][TOTAL][DATA]
-        // IDENTIFIER: 7 bytes, MSGID: 4 bytes, IDX: 1 byte, TOTAL: 1 byte, DATA: up to 7 bytes
-        // Total: 20 bytes
-        val msgId = (message.hashCode() and 0xFFFFFFFF.toInt()).toString(16).padStart(4, '0').take(4)
         val dataBytes = message.toByteArray(Charsets.UTF_8)
-        val maxDataPerChunk = 7
-        val totalChunks = (dataBytes.size + maxDataPerChunk - 1) / maxDataPerChunk
+        val totalChunks = (dataBytes.size + maxChunkSize - 1) / maxChunkSize
         val chunks = mutableListOf<ByteArray>()
         for (i in 0 until totalChunks) {
-            val start = i * maxDataPerChunk
-            val end = minOf(start + maxDataPerChunk, dataBytes.size)
-            val chunkData = dataBytes.sliceArray(start until end)
-            val chunk = ByteArray(7 + 4 + 1 + 1 + chunkData.size)
-            // IDENTIFIER
-            System.arraycopy(ADVERTISE_IDENTIFIER.toByteArray(Charsets.UTF_8), 0, chunk, 0, 7)
-            // MSGID
-            System.arraycopy(msgId.toByteArray(Charsets.UTF_8), 0, chunk, 7, 4)
-            // IDX
-            chunk[11] = i.toByte()
-            // TOTAL
-            chunk[12] = totalChunks.toByte()
-            // DATA
-            System.arraycopy(chunkData, 0, chunk, 13, chunkData.size)
-            chunks.add(chunk)
+            val start = i * maxChunkSize
+            val end = minOf(start + maxChunkSize, dataBytes.size)
+            chunks.add(dataBytes.sliceArray(start until end))
         }
         return chunks
     }
@@ -177,6 +165,7 @@ class MainActivity : AppCompatActivity() {
                         advertiseNext()
                     }, 250L)
                 }
+
                 override fun onStartFailure(errorCode: Int) {
                     Log.e("BLE", "Advertising failed: $errorCode")
                 }
@@ -185,9 +174,7 @@ class MainActivity : AppCompatActivity() {
         advertiseNext()
     }
 
-    // --- BLE Scanning ---
-
-    private fun startScanning(receiveEditText: EditText) {
+    private fun startScanning() {
         if (!bluetoothAdapter.isEnabled || !hasPermissions() || !::bluetoothLeScanner.isInitialized) {
             Log.e("BLE", "Cannot start scanning: Bluetooth not enabled or permissions missing.")
             return
@@ -204,29 +191,17 @@ class MainActivity : AppCompatActivity() {
         try {
             bluetoothLeScanner.startScan(listOf(scanFilter), scanSettings, object : ScanCallback() {
                 override fun onScanResult(callbackType: Int, result: ScanResult) {
+                    val deviceName = result.device?.name ?: result.scanRecord?.deviceName ?: ""
+                    // Only accept packets from other devices with our prefix, but not our own
+                    val myName = "$deviceNamePrefix${usernameEditText.text.toString().trim()}"
+                    if (!deviceName.startsWith(deviceNamePrefix) || deviceName == myName) return
+
                     val scanRecord = result.scanRecord ?: return
                     val data = scanRecord.getManufacturerSpecificData(0) ?: return
-                    if (data.size < 13) return // Not a valid chunk
-                    val identifier = data.copyOfRange(0, 7).toString(Charsets.UTF_8)
-                    if (identifier != ADVERTISE_IDENTIFIER) return // Not our app's packet
-
-                    val msgId = data.copyOfRange(7, 11).toString(Charsets.UTF_8)
-                    val idx = data[11].toInt() and 0xFF
-                    val total = data[12].toInt() and 0xFF
-                    val chunkData = data.copyOfRange(13, data.size)
-
-                    val chunkMap = receivedChunks.getOrPut(msgId) { sortedMapOf() }
-                    chunkMap[idx] = chunkData.toString(Charsets.UTF_8)
-                    receivedChunkCounts[msgId] = total
-
-                    // If all chunks received, reassemble
-                    if (chunkMap.size == total) {
-                        val fullMsg = (0 until total).joinToString("") { chunkMap[it] ?: "" }
-                        processReceivedMessage(fullMsg, receiveEditText)
-                        receivedChunks.remove(msgId)
-                        receivedChunkCounts.remove(msgId)
-                    }
+                    val message = String(data, Charsets.UTF_8)
+                    processReceivedMessage(message)
                 }
+
                 override fun onScanFailed(errorCode: Int) {
                     Log.e("BLE", "Scan failed: $errorCode")
                 }
@@ -236,21 +211,23 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun processReceivedMessage(fullMsg: String, receiveEditText: EditText) {
-        if (!fullMsg.startsWith("$ADVERTISE_IDENTIFIER|")) return
-        val payload = fullMsg.removePrefix("$ADVERTISE_IDENTIFIER|")
-        val receivedMessages = if (payload.isNotBlank()) payload.split(",") else emptyList()
+    private fun processReceivedMessage(message: String) {
+        val receivedMessages = message.split(",")
         var isUpdated = false
-        for (id in receivedMessages) {
-            val parts = id.split("_")
+        for (entry in receivedMessages) {
+            val parts = entry.split(":")
             if (parts.size == 2) {
-                val message = parts[0]
-                val timestamp = parts[1].toLongOrNull()
-                if (timestamp != null) {
-                    val newMessage = Message(message, timestamp)
-                    if (!messageSet.contains(newMessage.id)) {
-                        addMessage(newMessage)
-                        isUpdated = true
+                val username = parts[0]
+                val messageParts = parts[1].split("_")
+                if (messageParts.size == 2) {
+                    val msg = messageParts[0]
+                    val timestamp = messageParts[1].toLongOrNull()
+                    if (timestamp != null) {
+                        val newMessage = Message(username, msg, timestamp)
+                        if (!messageSet.contains(newMessage.id)) {
+                            addMessage(newMessage)
+                            isUpdated = true
+                        }
                     }
                 }
             }
@@ -258,10 +235,9 @@ class MainActivity : AppCompatActivity() {
         if (isUpdated) {
             runOnUiThread {
                 receiveEditText.setText(localMessages.joinToString("\n") {
-                    "${it.message} (${dateFormat.format(Date(it.timestamp))})"
+                    "${it.username}: ${it.message} (${dateFormat.format(Date(it.timestamp))})"
                 })
             }
-            updateBroadcastMessage()
         }
     }
 
@@ -273,8 +249,15 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    data class Message(val message: String, val timestamp: Long) {
+    private fun updateDeviceName() {
+        val username = usernameEditText.text.toString().trim()
+        if (username.isNotBlank()) {
+            bluetoothAdapter.name = "$deviceNamePrefix$username"
+        }
+    }
+
+    data class Message(val username: String, val message: String, val timestamp: Long) {
         val id: String
-            get() = "${message}_$timestamp"
+            get() = "${username}_${message}_$timestamp"
     }
 }
