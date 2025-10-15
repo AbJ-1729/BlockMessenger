@@ -78,7 +78,8 @@ class MainActivity : AppCompatActivity() {
             updateDeviceName()
             val message = sendEditText.text.toString().trim()
             if (message.isNotBlank()) {
-                val timestamp = System.currentTimeMillis() // Always use current device time
+                // Always use current device time for timestamp
+                val timestamp = System.currentTimeMillis()
                 val newMessage = Message(username, message, timestamp)
                 addMessage(newMessage)
                 updateBroadcastMessage()
@@ -191,14 +192,14 @@ class MainActivity : AppCompatActivity() {
         try {
             bluetoothLeScanner.startScan(listOf(scanFilter), scanSettings, object : ScanCallback() {
                 override fun onScanResult(callbackType: Int, result: ScanResult) {
-                    val deviceName = result.device?.name ?: result.scanRecord?.deviceName ?: ""
-                    // Only accept packets from other devices with our prefix, but not our own
-                    val myName = "$deviceNamePrefix${usernameEditText.text.toString().trim()}"
-                    if (!deviceName.startsWith(deviceNamePrefix) || deviceName == myName) return
-
                     val scanRecord = result.scanRecord ?: return
-                    val data = scanRecord.getManufacturerSpecificData(0) ?: return
+                    val data = scanRecord.getManufacturerSpecificData(0)
+                    if (data == null) {
+                        Log.d("BLE", "No manufacturer data found in scan result")
+                        return
+                    }
                     val message = String(data, Charsets.UTF_8)
+                    Log.i("BLE", "Received manufacturer data: $message")
                     processReceivedMessage(message)
                 }
 
@@ -213,6 +214,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun processReceivedMessage(message: String) {
         val receivedMessages = message.split(",")
+        val minValidTimestamp = 1577836800000L // 2020-01-01 00:00:00 UTC in millis
         var isUpdated = false
         for (entry in receivedMessages) {
             val parts = entry.split(":")
@@ -222,7 +224,8 @@ class MainActivity : AppCompatActivity() {
                 if (messageParts.size == 2) {
                     val msg = messageParts[0]
                     val timestamp = messageParts[1].toLongOrNull()
-                    if (timestamp != null) {
+                    // Only accept timestamps after 2020-01-01
+                    if (timestamp != null && timestamp > minValidTimestamp) {
                         val newMessage = Message(username, msg, timestamp)
                         if (!messageSet.contains(newMessage.id)) {
                             addMessage(newMessage)
@@ -232,12 +235,10 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
-        if (isUpdated) {
-            runOnUiThread {
-                receiveEditText.setText(localMessages.joinToString("\n") {
-                    "${it.username}: ${it.message} (${dateFormat.format(Date(it.timestamp))})"
-                })
-            }
+        runOnUiThread {
+            receiveEditText.setText(localMessages.joinToString("\n") {
+                "${it.username}: ${it.message} (${dateFormat.format(Date(it.timestamp))})"
+            })
         }
     }
 
@@ -256,8 +257,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    data class Message(val username: String, val message: String, val timestamp: Long) {
+    data class Message(
+        val username: String,
+        val message: String,
+        val timestamp: Long
+    ) {
         val id: String
-            get() = "${username}_${message}_$timestamp"
+            get() = "$username:$message:$timestamp"
     }
 }
