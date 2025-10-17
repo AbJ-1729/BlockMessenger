@@ -6,7 +6,10 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.le.*
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelUuid
+import android.text.Html
 import android.util.Log
 import android.widget.Button
 import android.widget.EditText
@@ -34,14 +37,80 @@ class MainActivity : AppCompatActivity() {
 
     private val maxChunkSize = 20
     private val localMessages = mutableListOf<Message>()
+    private val receivedMessages = mutableListOf<Message>()
     private val messageSet = HashSet<String>()
     private val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
     private var currentBroadcastMessage: String? = null
     private val deviceNamePrefix = "ab"
+    private val maxHistory = 20
 
     private lateinit var usernameEditText: EditText
     private lateinit var sendEditText: EditText
     private lateinit var receiveEditText: EditText
+
+    // For chunk reassembly
+    private val chunkBuffer = mutableMapOf<String, MutableMap<Int, ByteArray>>() // messageId -> (chunkIndex -> data)
+    private val chunkMeta = mutableMapOf<String, Int>() // messageId -> totalChunks
+    private val chunkTimestamps = mutableMapOf<String, Long>() // messageId -> last received time
+    private val chunkTimeoutMs = 30_000L // 30 seconds
+
+    private val cleanupHandler = Handler(Looper.getMainLooper())
+    private val cleanupRunnable = object : Runnable {
+        override fun run() {
+            val now = System.currentTimeMillis()
+            val expired = chunkTimestamps.filterValues { now - it > chunkTimeoutMs }.keys
+            for (id in expired) {
+                chunkBuffer.remove(id)
+                chunkMeta.remove(id)
+                chunkTimestamps.remove(id)
+            }
+            cleanupHandler.postDelayed(this, chunkTimeoutMs)
+        }
+    }
+
+    // Persistent callbacks
+    private val scanCallback = object : ScanCallback() {
+        override fun onScanResult(callbackType: Int, result: ScanResult) {
+            val scanRecord = result.scanRecord ?: return
+            val data = scanRecord.getManufacturerSpecificData(0)
+            if (data == null || data.size < 10) { // 8 for id, 2 for meta
+                Log.d("BLE", "No or invalid manufacturer data found in scan result")
+                return
+            }
+            // Parse header
+            val messageId = String(data.sliceArray(0..7), Charsets.UTF_8)
+            val totalChunks = data[8].toInt() and 0xFF
+            val chunkIndex = data[9].toInt() and 0xFF
+            val chunkData = data.sliceArray(10 until data.size)
+
+            // Buffer chunk
+            val buffer = chunkBuffer.getOrPut(messageId) { mutableMapOf() }
+            buffer[chunkIndex] = chunkData
+            chunkMeta[messageId] = totalChunks
+            chunkTimestamps[messageId] = System.currentTimeMillis()
+
+            // Check if all chunks received
+            if (buffer.size == totalChunks) {
+                // Reassemble
+                val fullData = (0 until totalChunks).flatMap { idx ->
+                    buffer[idx]?.toList() ?: emptyList()
+                }.toByteArray()
+                val message = String(fullData, Charsets.UTF_8)
+                Log.i("BLE", "Reassembled message: $message")
+                processReceivedMessage(message)
+                // Clean up
+                chunkBuffer.remove(messageId)
+                chunkMeta.remove(messageId)
+                chunkTimestamps.remove(messageId)
+            }
+        }
+
+        override fun onScanFailed(errorCode: Int) {
+            Log.e("BLE", "Scan failed: $errorCode")
+        }
+    }
+
+    private var advertiseCallback: AdvertiseCallback? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -90,6 +159,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        cleanupHandler.postDelayed(cleanupRunnable, chunkTimeoutMs)
         startScanning()
         updateBroadcastMessage()
     }
@@ -120,26 +190,47 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun stopAdvertising() {
-        if (::bluetoothLeAdvertiser.isInitialized) {
+        if (::bluetoothLeAdvertiser.isInitialized && advertiseCallback != null) {
             try {
-                bluetoothLeAdvertiser.stopAdvertising(object : AdvertiseCallback() {})
+                bluetoothLeAdvertiser.stopAdvertising(advertiseCallback)
             } catch (_: Exception) {}
         }
     }
 
     private fun splitMessageIntoChunks(message: String): List<ByteArray> {
+        // Each chunk: [messageId(8)][totalChunks(1)][chunkIndex(1)][data...]
+        // Manufacturer data must be <= 20 bytes (for compatibility)
+        val headerSize = 8 + 1 + 1 // 10 bytes
+        val maxPayload = maxChunkSize - headerSize // 10 bytes
         val dataBytes = message.toByteArray(Charsets.UTF_8)
-        val totalChunks = (dataBytes.size + maxChunkSize - 1) / maxChunkSize
+        val totalChunks = (dataBytes.size + maxPayload - 1) / maxPayload
+        val messageId = UUID.randomUUID().toString().substring(0, 8) // short unique id
+
         val chunks = mutableListOf<ByteArray>()
         for (i in 0 until totalChunks) {
-            val start = i * maxChunkSize
-            val end = minOf(start + maxChunkSize, dataBytes.size)
-            chunks.add(dataBytes.sliceArray(start until end))
+            val start = i * maxPayload
+            val end = minOf(start + maxPayload, dataBytes.size)
+            val chunkData = dataBytes.sliceArray(start until end)
+            val header = messageId.toByteArray(Charsets.UTF_8)
+            val meta = byteArrayOf(totalChunks.toByte(), i.toByte())
+            val chunk = header + meta + chunkData
+            if (chunk.size > maxChunkSize) {
+                Log.e("BLE", "Chunk size ${chunk.size} exceeds max $maxChunkSize bytes, dropping chunk!")
+                continue
+            }
+            chunks.add(chunk)
         }
         return chunks
     }
 
+    private var advertiseChunksTimer: Timer? = null
+    private var lastChunks: List<ByteArray>? = null
+
     private fun advertiseChunksLoop(chunks: List<ByteArray>) {
+        advertiseChunksTimer?.cancel()
+        lastChunks = chunks
+        if (chunks.isEmpty()) return
+
         val settings = AdvertiseSettings.Builder()
             .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
             .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
@@ -147,32 +238,37 @@ class MainActivity : AppCompatActivity() {
             .build()
 
         var chunkIndex = 0
-
-        fun advertiseNext() {
-            if (chunks.isEmpty()) return
-            val data = AdvertiseData.Builder()
-                .setIncludeDeviceName(false)
-                .addServiceUuid(ParcelUuid(serviceUuid))
-                .addManufacturerData(0, chunks[chunkIndex])
-                .build()
-
-            bluetoothLeAdvertiser.stopAdvertising(object : AdvertiseCallback() {})
-            bluetoothLeAdvertiser.startAdvertising(settings, data, object : AdvertiseCallback() {
-                override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
-                    Log.i("BLE", "Advertising chunk ${chunkIndex + 1}/${chunks.size}")
-                    window.decorView.postDelayed({
-                        bluetoothLeAdvertiser.stopAdvertising(this)
-                        chunkIndex = (chunkIndex + 1) % chunks.size
-                        advertiseNext()
-                    }, 250L)
-                }
-
-                override fun onStartFailure(errorCode: Int) {
-                    Log.e("BLE", "Advertising failed: $errorCode")
-                }
-            })
+        advertiseCallback = object : AdvertiseCallback() {
+            override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
+                Log.i("BLE", "Advertising chunk ${chunkIndex + 1}/${chunks.size}")
+            }
+            override fun onStartFailure(errorCode: Int) {
+                Log.e("BLE", "Advertising failed: $errorCode")
+            }
         }
-        advertiseNext()
+
+        advertiseChunksTimer = Timer()
+        advertiseChunksTimer?.scheduleAtFixedRate(object : TimerTask() {
+            override fun run() {
+                try {
+                    bluetoothLeAdvertiser.stopAdvertising(advertiseCallback)
+                } catch (_: Exception) {}
+                val data = AdvertiseData.Builder()
+                    .setIncludeDeviceName(false)
+                    .addServiceUuid(ParcelUuid(serviceUuid))
+                    .addManufacturerData(0, chunks[chunkIndex])
+                    .build()
+                bluetoothLeAdvertiser.startAdvertising(settings, data, advertiseCallback)
+                chunkIndex = (chunkIndex + 1) % chunks.size
+            }
+        }, 0, 350) // 350ms per chunk
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        advertiseChunksTimer?.cancel()
+        stopAdvertising()
+        cleanupHandler.removeCallbacks(cleanupRunnable)
     }
 
     private fun startScanning() {
@@ -190,33 +286,17 @@ class MainActivity : AppCompatActivity() {
             .build()
 
         try {
-            bluetoothLeScanner.startScan(listOf(scanFilter), scanSettings, object : ScanCallback() {
-                override fun onScanResult(callbackType: Int, result: ScanResult) {
-                    val scanRecord = result.scanRecord ?: return
-                    val data = scanRecord.getManufacturerSpecificData(0)
-                    if (data == null) {
-                        Log.d("BLE", "No manufacturer data found in scan result")
-                        return
-                    }
-                    val message = String(data, Charsets.UTF_8)
-                    Log.i("BLE", "Received manufacturer data: $message")
-                    processReceivedMessage(message)
-                }
-
-                override fun onScanFailed(errorCode: Int) {
-                    Log.e("BLE", "Scan failed: $errorCode")
-                }
-            })
+            bluetoothLeScanner.startScan(listOf(scanFilter), scanSettings, scanCallback)
         } catch (e: SecurityException) {
             Log.e("BLE", "SecurityException: ${e.message}")
         }
     }
 
     private fun processReceivedMessage(message: String) {
-        val receivedMessages = message.split(",")
+        val receivedMessagesRaw = message.split(",")
         val minValidTimestamp = 1577836800000L // 2020-01-01 00:00:00 UTC in millis
         var isUpdated = false
-        for (entry in receivedMessages) {
+        for (entry in receivedMessagesRaw) {
             val parts = entry.split(":")
             if (parts.size == 2) {
                 val username = parts[0]
@@ -227,8 +307,11 @@ class MainActivity : AppCompatActivity() {
                     // Only accept timestamps after 2020-01-01
                     if (timestamp != null && timestamp > minValidTimestamp) {
                         val newMessage = Message(username, msg, timestamp)
-                        if (!messageSet.contains(newMessage.id)) {
-                            addMessage(newMessage)
+                        // Only add if not sent by this user and not already present
+                        if (!messageSet.contains(newMessage.id) && username != usernameEditText.text.toString().trim()) {
+                            receivedMessages.add(newMessage)
+                            messageSet.add(newMessage.id)
+                            if (receivedMessages.size > maxHistory) receivedMessages.removeAt(0)
                             isUpdated = true
                         }
                     }
@@ -236,9 +319,12 @@ class MainActivity : AppCompatActivity() {
             }
         }
         runOnUiThread {
-            receiveEditText.setText(localMessages.joinToString("\n") {
-                "${it.username}: ${it.message} (${dateFormat.format(Date(it.timestamp))})"
-            })
+            // Show both sent and received messages, sorted by timestamp
+            val allMessages = (localMessages + receivedMessages).sortedBy { it.timestamp }
+            val formatted = allMessages.joinToString("<br>") {
+                "<b>${it.username}:</b> ${it.message} <span style='float:right; font-size:smaller; color:#888;'>${dateFormat.format(Date(it.timestamp))}</span>"
+            }
+            receiveEditText.setText(Html.fromHtml(formatted, Html.FROM_HTML_MODE_LEGACY))
         }
     }
 
@@ -246,6 +332,7 @@ class MainActivity : AppCompatActivity() {
         if (!messageSet.contains(message.id)) {
             localMessages.add(message)
             messageSet.add(message.id)
+            if (localMessages.size > maxHistory) localMessages.removeAt(0)
             localMessages.sortBy { it.timestamp }
         }
     }
