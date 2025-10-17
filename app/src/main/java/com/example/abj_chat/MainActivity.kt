@@ -21,6 +21,7 @@ import java.text.SimpleDateFormat
 import java.util.*
 import kotlin.collections.HashSet
 
+
 class MainActivity : AppCompatActivity() {
 
     private lateinit var bluetoothAdapter: BluetoothAdapter
