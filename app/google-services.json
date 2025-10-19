@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "680181918597",
+    "project_id": "my-offline-chat-app",
+    "storage_bucket": "my-offline-chat-app.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:680181918597:android:c6e0e8e24be5a4d29e72ec",
+        "android_client_info": {
+          "package_name": "com.example.abj_chat"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDA9ZLMfGPsx2cOpbibWlCzkYZz_NN1t_Y"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
